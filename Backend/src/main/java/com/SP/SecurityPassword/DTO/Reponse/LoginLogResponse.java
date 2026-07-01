@@ -1,0 +1,17 @@
+package com.SP.SecurityPassword.DTO.Reponse;
+
+import lombok.*;
+import java.time.LocalDateTime;
+
+@Getter @Setter @AllArgsConstructor @NoArgsConstructor @Builder
+public class LoginLogResponse {
+
+    private Integer id;
+    private Integer userId;
+    private String userName;
+    private Boolean success;
+    private String reason;
+    private String ipAddress;
+    private String userAgent;
+    private LocalDateTime createdAt;
+}
