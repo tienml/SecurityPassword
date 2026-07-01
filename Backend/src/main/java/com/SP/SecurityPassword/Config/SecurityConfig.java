@@ -1,10 +1,11 @@
 package com.SP.SecurityPassword.Config;
 
-import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
@@ -17,77 +18,65 @@ import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 import java.util.Arrays;
 import java.util.List;
-import java.util.stream.Collectors;
 
 @Configuration
 @EnableWebSecurity
-@RequiredArgsConstructor
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
-    @Value("${app.cors.allowed-origins:http://localhost:5173,http://localhost:3000}")
-    private String allowedOrigins;
+    @Value("${app.cors.allowed-origin-patterns:http://localhost:5500,http://127.0.0.1:5500}")
+    private String allowedOriginPatterns;
 
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-
-        http.csrf(csrf -> csrf.disable());
-
-        http.cors(cors -> cors.configurationSource(corsConfigurationSource()));
-
-        http.sessionManagement(session ->
-                session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
-        );
-
-        http.authorizeHttpRequests(auth -> auth
-
-                // Public APIs
-                .requestMatchers(HttpMethod.POST, "/api/auth/register").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/auth/forgot-password").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/auth/reset-password").permitAll()
-
-                // Swagger / OpenAPI
-                .requestMatchers(
-                        "/v3/api-docs/**",
-                        "/swagger-ui/**",
-                        "/swagger-ui.html"
-                ).permitAll()
-
-                // Admin APIs
-                .requestMatchers("/api/admin/**").hasRole("ADMIN")
-
-                // Other APIs
-                .anyRequest().authenticated()
-        );
-
-        http.addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
-
-        return http.build();
+    public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter) {
+        this.jwtAuthenticationFilter = jwtAuthenticationFilter;
     }
 
     @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(csrf -> csrf.disable())
+
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+
+                .sessionManagement(session ->
+                        session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                )
+
+                .authorizeHttpRequests(auth -> auth
+
+                        // Cho phép request OPTIONS của CORS
+                        .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+                        // API public
+                        .requestMatchers(HttpMethod.POST, "/api/auth/register").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/forgot-password").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/auth/reset-password").permitAll()
+
+                        // API admin
+                        .requestMatchers("/api/admin/**").hasRole("ADMIN")
+
+                        // Các API còn lại cần đăng nhập
+                        .anyRequest().authenticated()
+                )
+
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
     }
 
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
 
-        String originsProperty = allowedOrigins;
-
-        if (originsProperty == null || originsProperty.isBlank()) {
-            originsProperty = "http://localhost:5173,http://localhost:3000";
-        }
-
-        List<String> origins = Arrays.stream(originsProperty.split(","))
-                .map(origin -> origin.trim())
+        List<String> origins = Arrays.stream(allowedOriginPatterns.split(","))
+                .map(String::trim)
                 .filter(origin -> !origin.isBlank())
-                .collect(Collectors.toList());
+                .toList();
 
         configuration.setAllowedOriginPatterns(origins);
+
         configuration.setAllowedMethods(List.of(
                 "GET",
                 "POST",
@@ -96,12 +85,34 @@ public class SecurityConfig {
                 "DELETE",
                 "OPTIONS"
         ));
-        configuration.setAllowedHeaders(List.of("*"));
+
+        configuration.setAllowedHeaders(List.of(
+                "Authorization",
+                "Content-Type",
+                "Accept",
+                "Origin",
+                "X-Requested-With",
+                "ngrok-skip-browser-warning"
+        ));
+
         configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", configuration);
 
         return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(
+            AuthenticationConfiguration authenticationConfiguration
+    ) throws Exception {
+        return authenticationConfiguration.getAuthenticationManager();
     }
 }
