@@ -36,8 +36,8 @@ public class AuthService {
     @Value("${app.security.max-failed-attempts:5}")
     private int maxFailedAttempts;
 
-    @Value("${app.security.lock-duration-minutes:5}")
-    private int lockDurationMinutes;
+    @Value("${app.security.lock-duration-seconds:15}")
+    private long lockDurationSeconds;
 
     @Value("${app.security.otp-expiration-minutes:10}")
     private int otpExpirationMinutes;
@@ -250,7 +250,7 @@ public class AuthService {
         user.setFailedAttempts(failedAttempts);
 
         if (failedAttempts >= maxFailedAttempts) {
-            user.setLockedUntil(LocalDateTime.now().plusMinutes(lockDurationMinutes));
+            user.setLockedUntil(LocalDateTime.now().plusSeconds(lockDurationSeconds));
         }
 
         userRepository.save(user);
