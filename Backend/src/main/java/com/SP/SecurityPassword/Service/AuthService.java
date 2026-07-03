@@ -13,7 +13,9 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 
@@ -86,9 +88,23 @@ public class AuthService {
             throw new IllegalArgumentException("Tài khoản đã bị vô hiệu hóa");
         }
 
-        if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
-            saveLoginLog(user, loginIdentifier, false, "ACCOUNT_LOCKED", httpRequest);
-            throw new IllegalArgumentException("Tài khoản đang bị khóa tạm thời");
+        if (user.getLockedUntil() != null) {
+            LocalDateTime now = LocalDateTime.now();
+
+            if (user.getLockedUntil().isAfter(now)) {
+                long remainingSeconds = Duration.between(now, user.getLockedUntil()).getSeconds();
+
+                saveLoginLog(user, loginIdentifier, false, "ACCOUNT_LOCKED", httpRequest);
+
+                throw new IllegalArgumentException(
+                        "Tài khoản đang bị khóa tạm thời. Vui lòng thử lại sau "
+                                + remainingSeconds + " giây."
+                );
+            }
+
+            user.setFailedAttempts(0);
+            user.setLockedUntil(null);
+            userRepository.save(user);
         }
 
         boolean passwordMatches = passwordEncoder.matches(
@@ -98,6 +114,14 @@ public class AuthService {
 
         if (!passwordMatches) {
             handleFailedLogin(user, loginIdentifier, httpRequest);
+
+            if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
+                throw new IllegalArgumentException(
+                        "Tài khoản đang bị khóa tạm thời. Vui lòng thử lại sau "
+                                + lockDurationSeconds + " giây."
+                );
+            }
+
             throw new IllegalArgumentException("Tài khoản hoặc mật khẩu không đúng");
         }
 
