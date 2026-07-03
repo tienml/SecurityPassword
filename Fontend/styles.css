@@ -126,3 +126,41 @@ th {
 .table-wrap table td:nth-child(3){
   min-width:220px;
 }
+
+/* Thông báo lỗi đăng nhập và bộ đếm khóa tạm 15 giây */
+.inline-message{
+  width:100%;
+  box-sizing:border-box;
+  padding:12px 14px;
+  border-radius:12px;
+  background:#12351f;
+  border:1px solid #16a34a;
+  color:#d1fae5;
+  font-weight:700;
+  overflow-wrap:anywhere;
+}
+.inline-message.error{
+  background:#3a1111;
+  border-color:#dc2626;
+  color:#fecaca;
+}
+.pagination{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  padding:14px 0 4px;
+  flex-wrap:wrap;
+  color:#475569;
+  font-weight:700;
+}
+.pagination.single{
+  justify-content:flex-end;
+}
+.page-btn:disabled{
+  opacity:.45;
+  cursor:not-allowed;
+}
+.table-wrap td:last-child{
+  white-space:nowrap;
+}

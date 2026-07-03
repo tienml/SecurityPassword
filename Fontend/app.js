@@ -24,8 +24,17 @@ const state = {
   token: localStorage.getItem(STORAGE_KEYS.token) || localStorage.getItem('token') || '',
   user: safeJson(localStorage.getItem(STORAGE_KEYS.user) || localStorage.getItem('user')),
   adminTab: 'users',
-  isLoading: false
+  adminPage: { users: 1, loginLogs: 1, sessions: 1, passwordLogs: 1 },
+  adminData: { users: [], loginLogs: [], sessions: [], passwordLogs: [] },
+  isLoading: false,
+  loginLockTimer: null,
+  loginCountdown: 0
 };
+
+const LOGIN_LOCK_KEY = 'sp_login_lock_state';
+const LOGIN_FAIL_COUNT_KEY = 'sp_login_fail_count_state';
+const TEMP_LOCK_SECONDS = 15;
+const MAX_FAILED_ATTEMPTS = 5;
 
 function safeJson(value) {
   try { return value ? JSON.parse(value) : null; } catch { return null; }
@@ -80,12 +89,20 @@ async function apiRequest(keyOrPath, { method = 'GET', body = null, auth = true 
     const text = await res.text();
     responseData = parseResponse(text, res.ok, res.status);
     setResponse(responseData);
-    if (!res.ok || responseData.success === false) throw new Error(responseData.message || `HTTP ${res.status}`);
+    if (!res.ok || responseData.success === false) {
+      const err = new Error(responseData.message || `HTTP ${res.status}`);
+      err.response = responseData;
+      err.status = res.status;
+      throw err;
+    }
     return responseData;
   } catch (error) {
     const message = normalizeFetchError(error);
-    setResponse(responseData || { success: false, message, data: null });
-    throw new Error(message);
+    const err = new Error(message);
+    err.response = error.response || responseData || { success: false, message, data: null };
+    err.status = error.status;
+    setResponse(err.response);
+    throw err;
   } finally {
     setLoading(false);
   }
@@ -241,16 +258,94 @@ function renderProfile(user = {}) {
   profileView.innerHTML = rows.map(([label, value]) => `<div class="info-card"><span>${label}</span><strong>${value ?? ''}</strong></div>`).join('');
 }
 
-function renderTable(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) {
-    const adminTable = $('#adminTable');
-    if (adminTable) adminTable.innerHTML = '<div class="empty">Không có dữ liệu.</div>';
-    return;
+const ADMIN_PAGE_SIZE = 15;
+
+function isAdminRow(row) {
+  return String(getValue(row, 'role') || '').toUpperCase() === 'ADMIN';
+}
+
+function getAllLoginLockStates() {
+  return safeJson(localStorage.getItem(LOGIN_LOCK_KEY)) || {};
+}
+
+function normalizeLockKey(value) {
+  return String(value ?? '').trim().toLowerCase();
+}
+
+function getUserIdentifiers(row = {}) {
+  return [
+    getValue(row, 'id', 'userId'),
+    getValue(row, 'userName', 'username', 'name'),
+    getValue(row, 'email'),
+    getValue(row, 'loginIdentifier')
+  ].map(normalizeLockKey).filter(Boolean);
+}
+
+function getLocalLockForUser(row = {}) {
+  const allLocks = getAllLoginLockStates();
+  const keys = getUserIdentifiers(row);
+  for (const key of keys) {
+    if (allLocks[key]) return allLocks[key];
   }
-  const keys = Object.keys(rows[0]);
+  return null;
+}
+
+// Backend hiện chỉ khóa tạm 15 giây sau khi sai mật khẩu.
+// Frontend không còn chức năng khóa vĩnh viễn hoặc yêu cầu ADMIN mở khóa.
+function isTemporaryLockedUser(row) {
+  const lockedUntil = getValue(row, 'lockedUntil', 'locked_until');
+  const lockedUntilTime = lockedUntil ? new Date(lockedUntil).getTime() : 0;
+  return Number.isFinite(lockedUntilTime) && lockedUntilTime > Date.now();
+}
+
+function enrichAdminUser(row) {
+  return row;
+}
+
+function clearLocalLockForUser(row = {}) {
+  const allLocks = getAllLoginLockStates();
+  getUserIdentifiers(row).forEach((key) => delete allLocks[key]);
+  localStorage.setItem(LOGIN_LOCK_KEY, JSON.stringify(allLocks));
+}
+
+function getVisibleAdminRows(rows) {
+  if (!Array.isArray(rows)) return [];
+  if (state.adminTab !== 'users') return rows;
+  return rows.filter((row) => !isAdminRow(row));
+}
+
+function renderTable(rows) {
   const adminTable = $('#adminTable');
   if (!adminTable) return;
-  adminTable.innerHTML = `<table><thead><tr>${keys.map((k) => `<th>${k}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${keys.map((k) => `<td>${formatCell(row[k])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+
+  const visibleRows = getVisibleAdminRows(rows);
+
+  if (!Array.isArray(visibleRows) || visibleRows.length === 0) {
+    adminTable.innerHTML = '<div class="empty">Không có dữ liệu.</div>';
+    return;
+  }
+
+  const hiddenKeys = ['passwordHash', 'password', 'hash'];
+  const keys = Object.keys(visibleRows[0]).filter((key) => !key.startsWith('_') && !hiddenKeys.some((hidden) => key.toLowerCase().includes(hidden.toLowerCase())));
+  const currentPage = state.adminPage[state.adminTab] || 1;
+  const totalPages = Math.max(1, Math.ceil(visibleRows.length / ADMIN_PAGE_SIZE));
+  const safePage = Math.min(Math.max(currentPage, 1), totalPages);
+  state.adminPage[state.adminTab] = safePage;
+
+  const start = (safePage - 1) * ADMIN_PAGE_SIZE;
+  const pageRows = visibleRows.slice(start, start + ADMIN_PAGE_SIZE);
+
+  const tableHtml = `<table><thead><tr>${keys.map((k) => `<th>${k}</th>`).join('')}</tr></thead><tbody>${pageRows.map((row) => `<tr>${keys.map((k) => `<td>${formatCell(row[k])}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+
+  const paginationHtml = visibleRows.length > ADMIN_PAGE_SIZE
+    ? `<div class="pagination">
+        <button class="secondary page-btn" data-page-action="prev" ${safePage === 1 ? 'disabled' : ''}>Trang trước</button>
+        <span>Trang ${safePage}/${totalPages} · Hiển thị ${start + 1}-${Math.min(start + ADMIN_PAGE_SIZE, visibleRows.length)} / ${visibleRows.length}</span>
+        <button class="secondary page-btn" data-page-action="next" ${safePage === totalPages ? 'disabled' : ''}>Trang sau</button>
+      </div>`
+    : `<div class="pagination single"><span>Hiển thị ${visibleRows.length} thông tin</span></div>`;
+
+  adminTable.innerHTML = tableHtml + paginationHtml;
 }
 
 function formatCell(value) {
@@ -285,7 +380,8 @@ async function loadAdminData() {
   }
   try {
     const res = await apiRequest(state.adminTab);
-    renderTable(res.data || []);
+    state.adminData[state.adminTab] = Array.isArray(res.data) ? res.data : [];
+    renderTable(state.adminData[state.adminTab]);
   } catch (error) { showToast(error.message, true); }
 }
 
@@ -299,11 +395,23 @@ function bindEvents() {
     $$('.tab').forEach((tab) => tab.classList.remove('active'));
     btn.classList.add('active');
     state.adminTab = btn.dataset.admin;
+    state.adminPage[state.adminTab] = 1;
     loadAdminData();
   }));
 
 
   $('#loginForm')?.addEventListener('submit', handleLogin);
+  $('#loginForm input[name="loginIdentifier"]')?.addEventListener('input', (e) => {
+    if (state.loginLockTimer) clearInterval(state.loginLockTimer);
+    state.loginLockTimer = null;
+    const submitBtn = getLoginSubmitButton();
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Đăng nhập';
+    }
+    setLoginMessage('');
+    restoreLoginCountdownIfNeeded(e.target.value);
+  });
   $('#registerForm')?.addEventListener('submit', handleRegister);
   $('#forgotForm')?.addEventListener('submit', handleForgot);
   $('#resetForm')?.addEventListener('submit', handleReset);
@@ -312,16 +420,233 @@ function bindEvents() {
   $('#refreshAdmin')?.addEventListener('click', loadAdminData);
   $('#logoutBtn')?.addEventListener('click', logout);
   $('#clearResponse')?.addEventListener('click', () => setResponse('Chưa có dữ liệu.'));
+  $('#adminTable')?.addEventListener('click', (e) => {
+    const pageBtn = e.target.closest('.page-btn');
+    if (pageBtn) {
+      const total = state.adminData[state.adminTab]?.length || 0;
+      const totalPages = Math.max(1, Math.ceil(total / ADMIN_PAGE_SIZE));
+      const action = pageBtn.dataset.pageAction;
+      if (action === 'prev') state.adminPage[state.adminTab] = Math.max(1, (state.adminPage[state.adminTab] || 1) - 1);
+      if (action === 'next') state.adminPage[state.adminTab] = Math.min(totalPages, (state.adminPage[state.adminTab] || 1) + 1);
+      renderTable(state.adminData[state.adminTab] || []);
+    }
+  });
 }
+
+
+
+
+function getAllLoginLocks() {
+  return safeJson(localStorage.getItem(LOGIN_LOCK_KEY)) || {};
+}
+
+function getLoginLockState(identifier = '') {
+  const all = getAllLoginLocks();
+  return all[normalizeLockKey(identifier)] || null;
+}
+
+function saveLoginLockState(identifier, value) {
+  const key = normalizeLockKey(identifier);
+  if (!key) return;
+  const all = getAllLoginLocks();
+  all[key] = value;
+  localStorage.setItem(LOGIN_LOCK_KEY, JSON.stringify(all));
+}
+
+function clearLoginLockState(identifier) {
+  const key = normalizeLockKey(identifier);
+  if (!key) return;
+  const all = getAllLoginLocks();
+  delete all[key];
+  localStorage.setItem(LOGIN_LOCK_KEY, JSON.stringify(all));
+}
+
+function getAllLoginFailCounts() {
+  return safeJson(localStorage.getItem(LOGIN_FAIL_COUNT_KEY)) || {};
+}
+
+function getLoginFailCount(identifier = '') {
+  const key = normalizeLockKey(identifier);
+  if (!key) return 0;
+  const all = getAllLoginFailCounts();
+  return Number(all[key] || 0);
+}
+
+function saveLoginFailCount(identifier, count) {
+  const key = normalizeLockKey(identifier);
+  if (!key) return;
+  const all = getAllLoginFailCounts();
+  all[key] = Math.max(0, Number(count) || 0);
+  localStorage.setItem(LOGIN_FAIL_COUNT_KEY, JSON.stringify(all));
+}
+
+function clearLoginFailCount(identifier) {
+  const key = normalizeLockKey(identifier);
+  if (!key) return;
+  const all = getAllLoginFailCounts();
+  delete all[key];
+  localStorage.setItem(LOGIN_FAIL_COUNT_KEY, JSON.stringify(all));
+}
+
+function setLoginMessage(message = '', isError = false) {
+  const box = $('#loginMessage');
+  if (!box) return;
+  box.textContent = message;
+  box.className = `inline-message ${isError ? 'error' : ''} ${message ? '' : 'hidden'}`;
+}
+
+function getLoginSubmitButton() {
+  return $('#loginForm button[type="submit"]');
+}
+
+function extractSecondsFromMessage(message = '') {
+  const text = String(message || '').toLowerCase();
+  const match = text.match(/(\d+)\s*(giây|giay|s|sec|second)/i);
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+function extractLockUntilMs(response = {}) {
+  const data = response.data && typeof response.data === 'object' ? response.data : {};
+  const rawLockedUntil = getValue(response, 'lockedUntil', 'locked_until') || getValue(data, 'lockedUntil', 'locked_until');
+  const rawSeconds = getValue(response, 'retryAfterSeconds', 'remainingSeconds', 'lockSeconds', 'lockedSeconds', 'retryAfter')
+    ?? getValue(data, 'retryAfterSeconds', 'remainingSeconds', 'lockSeconds', 'lockedSeconds', 'retryAfter');
+
+  if (rawLockedUntil) {
+    const time = new Date(rawLockedUntil).getTime();
+    if (Number.isFinite(time) && time > Date.now()) return time;
+  }
+
+  const seconds = Number(rawSeconds) || extractSecondsFromMessage(response.message);
+  if (Number.isFinite(seconds) && seconds > 0) return Date.now() + seconds * 1000;
+
+  return null;
+}
+
+function startLoginCountdownUntil(lockedUntilMs, identifier = '', messagePrefix = 'Bạn đã nhập sai 5 lần. Tài khoản bị khóa tạm 15 giây') {
+  clearInterval(state.loginLockTimer);
+  const submitBtn = getLoginSubmitButton();
+
+  const tick = () => {
+    const remaining = Math.ceil((Number(lockedUntilMs) - Date.now()) / 1000);
+    if (remaining <= 0) {
+      clearInterval(state.loginLockTimer);
+      state.loginLockTimer = null;
+      state.loginCountdown = 0;
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Đăng nhập';
+      }
+      clearLoginLockState(identifier);
+      clearLoginFailCount(identifier);
+      setLoginMessage('Đã hết 15 giây khóa tạm. Bạn có thể bấm Đăng nhập lại. Nếu sai tiếp 5 lần, tài khoản sẽ tiếp tục bị khóa 15 giây.', false);
+      return;
+    }
+
+    state.loginCountdown = remaining;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = `Đợi ${remaining}s`;
+    }
+    setLoginMessage(`${messagePrefix}. Còn ${remaining}s.`, true);
+  };
+
+  tick();
+  state.loginLockTimer = setInterval(tick, 1000);
+}
+
+function restoreLoginCountdownIfNeeded(identifier = '') {
+  const lock = getLoginLockState(identifier);
+  if (!lock || !lock.lockedUntil) return false;
+
+  const lockedUntilMs = Number(lock.lockedUntil);
+  if (Number.isFinite(lockedUntilMs) && lockedUntilMs > Date.now()) {
+    startLoginCountdownUntil(lockedUntilMs, identifier, lock.message || 'Tài khoản đang bị khóa tạm');
+    return true;
+  }
+
+  clearLoginLockState(identifier);
+  return false;
+}
+
+function handleLoginFailure(error, identifier) {
+  const response = error.response || {};
+  const data = response.data && typeof response.data === 'object' ? response.data : {};
+  const failedAttemptsFromApi = getValue(response, 'failedAttempts', 'failed_attempts') ?? getValue(data, 'failedAttempts', 'failed_attempts');
+  const remainingAttemptsFromApi = getValue(response, 'remainingAttempts', 'remaining_attempts') ?? getValue(data, 'remainingAttempts', 'remaining_attempts');
+  const lockedUntilMs = extractLockUntilMs(response);
+
+  if (lockedUntilMs) {
+    const lockMessage = response.message || error.message || 'Bạn đã nhập sai 5 lần. Tài khoản bị khóa tạm 15 giây';
+    saveLoginLockState(identifier, { lockedUntil: lockedUntilMs, message: lockMessage });
+    saveLoginFailCount(identifier, MAX_FAILED_ATTEMPTS);
+    startLoginCountdownUntil(lockedUntilMs, identifier, lockMessage);
+    return;
+  }
+
+  // Trường hợp backend chỉ trả status 423/429 hoặc chỉ trả message khóa 15 giây nhưng chưa trả lockedUntil.
+  const errorText = `${response.message || ''} ${error.message || ''}`.toLowerCase();
+  const looksLikeTemporaryLock = error.status === 423 || error.status === 429 ||
+    ((errorText.includes('khóa') || errorText.includes('khoa') || errorText.includes('lock')) &&
+    (errorText.includes('15') || errorText.includes('giây') || errorText.includes('giay') || errorText.includes('thử lại') || errorText.includes('thu lai')));
+
+  if (looksLikeTemporaryLock) {
+    const fallbackSeconds = extractSecondsFromMessage(errorText) || TEMP_LOCK_SECONDS;
+    const fallbackUntil = Date.now() + fallbackSeconds * 1000;
+    const lockMessage = response.message || error.message || `Bạn đã nhập sai 5 lần. Tài khoản bị khóa tạm ${fallbackSeconds} giây`;
+    saveLoginLockState(identifier, { lockedUntil: fallbackUntil, message: lockMessage });
+    saveLoginFailCount(identifier, MAX_FAILED_ATTEMPTS);
+    startLoginCountdownUntil(fallbackUntil, identifier, lockMessage);
+    return;
+  }
+
+  const apiFailed = Number(failedAttemptsFromApi);
+  const localFailed = Number.isFinite(apiFailed) && apiFailed > 0
+    ? apiFailed
+    : getLoginFailCount(identifier) + 1;
+
+  // Backend khóa sau mỗi 5 lần sai. Nếu backend chưa trả lockedUntil ở lần thứ 5, frontend vẫn khóa nút 15s để đúng giao diện yêu cầu.
+  if (localFailed >= MAX_FAILED_ATTEMPTS) {
+    const fallbackUntil = Date.now() + TEMP_LOCK_SECONDS * 1000;
+    const lockMessage = `Bạn đã nhập sai ${MAX_FAILED_ATTEMPTS} lần. Tài khoản bị khóa tạm ${TEMP_LOCK_SECONDS} giây`;
+    saveLoginFailCount(identifier, MAX_FAILED_ATTEMPTS);
+    saveLoginLockState(identifier, { lockedUntil: fallbackUntil, message: lockMessage });
+    startLoginCountdownUntil(fallbackUntil, identifier, lockMessage);
+    return;
+  }
+
+  saveLoginFailCount(identifier, localFailed);
+  const remaining = Number.isFinite(Number(remainingAttemptsFromApi))
+    ? Number(remainingAttemptsFromApi)
+    : Math.max(0, MAX_FAILED_ATTEMPTS - localFailed);
+
+  setLoginMessage(`Sai tài khoản hoặc mật khẩu lần ${localFailed}/${MAX_FAILED_ATTEMPTS}. Còn ${remaining} lần thử, sai đủ ${MAX_FAILED_ATTEMPTS} lần sẽ khóa tạm ${TEMP_LOCK_SECONDS} giây.`, true);
+}
+
 
 async function handleLogin(e) {
   e.preventDefault();
+  const body = getFormData(e.target);
+  const identifier = body.loginIdentifier || body.email || body.userName || '';
+
+  // Nếu đang trong 15 giây khóa tạm, frontend chỉ đếm ngược và KHÔNG gọi API.
+  if (state.loginLockTimer || restoreLoginCountdownIfNeeded(identifier)) return;
+
   try {
-    const res = await apiRequest('login', { method: 'POST', body: getFormData(e.target), auth: false });
+    setLoginMessage('');
+    const submitBtn = getLoginSubmitButton();
+    if (submitBtn) submitBtn.textContent = 'Đăng nhập';
+    const res = await apiRequest('login', { method: 'POST', body, auth: false });
+    clearLoginLockState(identifier);
+    clearLoginFailCount(identifier);
     saveSession(res);
     showToast(res.message || 'Đăng nhập thành công');
     openPage('profilePage');
-  } catch (error) { showToast(error.message, true); }
+  } catch (error) {
+    showToast(error.message, true);
+    handleLoginFailure(error, identifier);
+  }
 }
 
 async function handleRegister(e) {
