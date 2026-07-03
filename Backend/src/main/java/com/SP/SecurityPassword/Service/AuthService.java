@@ -14,6 +14,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 
@@ -36,8 +37,8 @@ public class AuthService {
     @Value("${app.security.max-failed-attempts:5}")
     private int maxFailedAttempts;
 
-    @Value("${app.security.lock-duration-minutes:5}")
-    private int lockDurationMinutes;
+    @Value("${app.security.lock-duration-seconds:15}")
+    private long lockDurationSeconds;
 
     @Value("${app.security.otp-expiration-minutes:10}")
     private int otpExpirationMinutes;
@@ -72,64 +73,91 @@ public class AuthService {
 
     @Transactional
     public LoginResponse login(LoginRequest request, HttpServletRequest httpRequest) {
-        String loginIdentifier = request.getLoginIdentifier();
+    String loginIdentifier = request.getLoginIdentifier();
 
-        User user = findByUsernameOrEmail(loginIdentifier);
+    User user = findByUsernameOrEmail(loginIdentifier);
 
-        if (user == null) {
-            saveLoginLog(null, loginIdentifier, false, "USER_NOT_FOUND", httpRequest);
-            throw new IllegalArgumentException("Tài khoản hoặc mật khẩu không đúng");
-        }
+    if (user == null) {
+        saveLoginLog(null, loginIdentifier, false, "USER_NOT_FOUND", httpRequest);
+        throw new IllegalArgumentException("Tài khoản hoặc mật khẩu không đúng");
+    }
 
-        if (Boolean.FALSE.equals(user.getIsActive())) {
-            saveLoginLog(user, loginIdentifier, false, "ACCOUNT_INACTIVE", httpRequest);
-            throw new IllegalArgumentException("Tài khoản đã bị vô hiệu hóa");
-        }
+    if (Boolean.FALSE.equals(user.getIsActive())) {
+        saveLoginLog(user, loginIdentifier, false, "ACCOUNT_INACTIVE", httpRequest);
+        throw new IllegalArgumentException("Tài khoản đã bị vô hiệu hóa");
+    }
 
-        if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
+    if (user.getLockedUntil() != null) {
+        LocalDateTime now = LocalDateTime.now();
+
+        if (user.getLockedUntil().isAfter(now)) {
+            long remainingMillis = Duration.between(now, user.getLockedUntil()).toMillis();
+            long remainingSeconds = Math.max(1, (long) Math.ceil(remainingMillis / 1000.0));
+
             saveLoginLog(user, loginIdentifier, false, "ACCOUNT_LOCKED", httpRequest);
-            throw new IllegalArgumentException("Tài khoản đang bị khóa tạm thời");
-        }
 
-        boolean passwordMatches = passwordEncoder.matches(
-                request.getPassword(),
-                user.getPasswordHash()
-        );
-
-        if (!passwordMatches) {
-            handleFailedLogin(user, loginIdentifier, httpRequest);
-            throw new IllegalArgumentException("Tài khoản hoặc mật khẩu không đúng");
+            throw new IllegalArgumentException(
+                    "Tài khoản đang bị khóa tạm thời. Vui lòng thử lại sau "
+                            + remainingSeconds + " giây."
+            );
         }
 
         user.setFailedAttempts(0);
         user.setLockedUntil(null);
-        user.setLastLoginAt(LocalDateTime.now());
         userRepository.save(user);
+    }
 
-        String jwtId = jwtUtil.generateJwtId();
-        String token = jwtUtil.generateToken(user, jwtId);
+    boolean passwordMatches = passwordEncoder.matches(
+            request.getPassword(),
+            user.getPasswordHash()
+    );
 
-        UserSession session = UserSession.builder()
-                .user(user)
-                .jwtId(jwtId)
-                .tokenHash(null)
-                .isActive(true)
-                .expiresAt(LocalDateTime.now().plus(jwtUtil.getJwtExpiration(), ChronoUnit.MILLIS))
-                .build();
+    if (!passwordMatches) {
+        handleFailedLogin(user, loginIdentifier, httpRequest);
 
-        userSessionRepository.save(session);
+        if (user.getLockedUntil() != null && user.getLockedUntil().isAfter(LocalDateTime.now())) {
+            LocalDateTime now = LocalDateTime.now();
+            long remainingMillis = Duration.between(now, user.getLockedUntil()).toMillis();
+            long remainingSeconds = Math.max(1, (long) Math.ceil(remainingMillis / 1000.0));
 
-        saveLoginLog(user, loginIdentifier, true, "LOGIN_SUCCESS", httpRequest);
+            throw new IllegalArgumentException(
+                    "Tài khoản đang bị khóa tạm thời. Vui lòng thử lại sau "
+                            + remainingSeconds + " giây."
+            );
+        }
 
-        return LoginResponse.builder()
-                .token(token)
-                .tokenType("Bearer")
-                .expiresIn(jwtUtil.getJwtExpiration())
-                .userId(user.getId())
-                .userName(user.getUserName())
-                .email(user.getEmail())
-                .role(user.getRole())
-                .build();
+        throw new IllegalArgumentException("Tài khoản hoặc mật khẩu không đúng");
+    }
+
+    user.setFailedAttempts(0);
+    user.setLockedUntil(null);
+    user.setLastLoginAt(LocalDateTime.now());
+    userRepository.save(user);
+
+    String jwtId = jwtUtil.generateJwtId();
+    String token = jwtUtil.generateToken(user, jwtId);
+
+    UserSession session = UserSession.builder()
+            .user(user)
+            .jwtId(jwtId)
+            .tokenHash(null)
+            .isActive(true)
+            .expiresAt(LocalDateTime.now().plus(jwtUtil.getJwtExpiration(), ChronoUnit.MILLIS))
+            .build();
+
+    userSessionRepository.save(session);
+
+    saveLoginLog(user, loginIdentifier, true, "LOGIN_SUCCESS", httpRequest);
+
+    return LoginResponse.builder()
+            .token(token)
+            .tokenType("Bearer")
+            .expiresIn(jwtUtil.getJwtExpiration())
+            .userId(user.getId())
+            .userName(user.getUserName())
+            .email(user.getEmail())
+            .role(user.getRole())
+            .build();
     }
 
     @Transactional
@@ -250,7 +278,7 @@ public class AuthService {
         user.setFailedAttempts(failedAttempts);
 
         if (failedAttempts >= maxFailedAttempts) {
-            user.setLockedUntil(LocalDateTime.now().plusMinutes(lockDurationMinutes));
+            user.setLockedUntil(LocalDateTime.now().plusSeconds(lockDurationSeconds));
         }
 
         userRepository.save(user);
