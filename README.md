@@ -32,6 +32,12 @@ Project gồm:
 - Password Hashing: BCrypt
 - OTP Reset Password: Email OTP
 
+## Video demo
+
+Video demo project:
+
+- Demo link: [SecurityPassword Demo](https://drive.google.com/file/d/11_E-1zDfIBBxZuQ26qqgpyoPLQX1TwZ_/view?usp=sharing)
+
 ## Cấu trúc thư mục
 
 ```text
